@@ -28,6 +28,7 @@ class StravaDataParser:
         """
         self.data_directory = Path(data_directory)
         self.coordinates = []
+        self.activities = []  # Store activity metadata
 
     def parse_gpx_file(self, file_path: Path) -> List[Tuple[float, float]]:
         """
@@ -44,10 +45,31 @@ class StravaDataParser:
             with open(file_path, 'r') as gpx_file:
                 gpx = gpxpy.parse(gpx_file)
 
+                # Extract activity metadata
+                total_distance = 0
+                total_duration = 0
+
                 for track in gpx.tracks:
                     for segment in track.segments:
                         for point in segment.points:
                             coords.append((point.latitude, point.longitude))
+
+                # Calculate distance and duration using gpxpy
+                total_distance = gpx.length_3d() if gpx.length_3d() else gpx.length_2d()
+
+                # Get time bounds
+                time_bounds = gpx.get_time_bounds()
+                if time_bounds.start_time and time_bounds.end_time:
+                    total_duration = (time_bounds.end_time - time_bounds.start_time).total_seconds()
+
+                # Store activity metadata
+                self.activities.append({
+                    'filename': file_path.name,
+                    'type': 'gpx',
+                    'distance_m': total_distance,
+                    'duration_s': total_duration,
+                    'points': len(coords)
+                })
 
                 logger.info(f"Parsed {len(coords)} points from {file_path.name}")
         except Exception as e:
@@ -94,6 +116,24 @@ class StravaDataParser:
             List of (latitude, longitude) tuples
         """
         coords = []
+        total_distance = 0
+        total_duration = 0
+        start_time = None
+        end_time = None
+
+        # Get session data for distance and duration
+        for session in fitfile.get_messages('session'):
+            for data in session:
+                if data.name == 'total_distance':
+                    total_distance = data.value if data.value else 0
+                elif data.name == 'total_elapsed_time':
+                    total_duration = data.value if data.value else 0
+                elif data.name == 'start_time':
+                    start_time = data.value
+                elif data.name == 'timestamp':
+                    end_time = data.value
+
+        # Extract coordinates
         for record in fitfile.get_messages('record'):
             lat = None
             lon = None
@@ -109,6 +149,15 @@ class StravaDataParser:
                 lat_deg = lat * (180 / 2**31)
                 lon_deg = lon * (180 / 2**31)
                 coords.append((lat_deg, lon_deg))
+
+        # Store activity metadata
+        self.activities.append({
+            'filename': filename,
+            'type': 'fit',
+            'distance_m': total_distance,
+            'duration_s': total_duration,
+            'points': len(coords)
+        })
 
         logger.info(f"Parsed {len(coords)} points from {filename}")
         return coords
@@ -195,12 +244,12 @@ class StravaDataParser:
 
         return all_coords
 
-    def get_activity_stats(self) -> Dict[str, int]:
+    def get_activity_stats(self) -> Dict:
         """
         Get statistics about parsed activities.
 
         Returns:
-            Dictionary with activity counts and coordinate count
+            Dictionary with activity counts, distances, durations, etc.
         """
         gpx_count = len(list(self.data_directory.rglob("*.gpx")))
         fit_count = len(list(self.data_directory.rglob("*.fit")))
@@ -209,10 +258,39 @@ class StravaDataParser:
 
         total_fit = fit_count + fit_gz_count
 
+        # Calculate aggregate statistics from activities
+        total_distance_m = sum(a['distance_m'] for a in self.activities if a['distance_m'])
+        total_duration_s = sum(a['duration_s'] for a in self.activities if a['duration_s'])
+
+        # Calculate averages (only for activities with valid data)
+        activities_with_distance = [a for a in self.activities if a['distance_m'] > 0]
+        activities_with_duration = [a for a in self.activities if a['duration_s'] > 0]
+
+        avg_distance_m = total_distance_m / len(activities_with_distance) if activities_with_distance else 0
+        avg_duration_s = total_duration_s / len(activities_with_duration) if activities_with_duration else 0
+
+        # Calculate average pace (min/km) for activities with both distance and duration
+        activities_with_pace = [a for a in self.activities if a['distance_m'] > 0 and a['duration_s'] > 0]
+        if activities_with_pace:
+            total_pace = sum((a['duration_s'] / 60) / (a['distance_m'] / 1000)
+                           for a in activities_with_pace)
+            avg_pace_min_per_km = total_pace / len(activities_with_pace)
+        else:
+            avg_pace_min_per_km = 0
+
         return {
             'gpx_files': gpx_count,
             'fit_files': total_fit,
             'tcx_files': tcx_count,
             'total_activities': gpx_count + total_fit + tcx_count,
-            'total_coordinates': len(self.coordinates)
+            'total_coordinates': len(self.coordinates),
+            'total_distance_km': total_distance_m / 1000,
+            'total_distance_mi': total_distance_m / 1609.34,
+            'total_duration_hours': total_duration_s / 3600,
+            'avg_distance_km': avg_distance_m / 1000,
+            'avg_distance_mi': avg_distance_m / 1609.34,
+            'avg_duration_minutes': avg_duration_s / 60,
+            'avg_pace_min_per_km': avg_pace_min_per_km,
+            'avg_pace_min_per_mi': avg_pace_min_per_km * 1.60934,
+            'activities_with_data': len(activities_with_distance)
         }

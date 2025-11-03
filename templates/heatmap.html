@@ -10,7 +10,7 @@
     }
 
     .stat-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        background: linear-gradient(135deg, #2d5f2d 0%, #1a3d1a 100%);
         padding: 20px;
         border-radius: 8px;
         color: white;
@@ -54,16 +54,32 @@
         <div class="stat-label">Total Activities</div>
     </div>
     <div class="stat-card">
+        <div class="stat-value">{{ "%.1f"|format(stats.total_distance_km) }}</div>
+        <div class="stat-label">Total Distance (km)</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ "%.1f"|format(stats.total_distance_mi) }}</div>
+        <div class="stat-label">Total Distance (mi)</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ "%.0f"|format(stats.total_duration_hours) }}</div>
+        <div class="stat-label">Total Hours</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ "%.1f"|format(stats.avg_distance_km) }}</div>
+        <div class="stat-label">Avg Distance (km)</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ "%.0f"|format(stats.avg_duration_minutes) }}</div>
+        <div class="stat-label">Avg Duration (min)</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ "%d:%02d"|format(stats.avg_pace_min_per_km|int, ((stats.avg_pace_min_per_km % 1) * 60)|int) }}</div>
+        <div class="stat-label">Avg Pace (min/km)</div>
+    </div>
+    <div class="stat-card">
         <div class="stat-value">{{ "{:,}".format(stats.total_coordinates) }}</div>
         <div class="stat-label">GPS Points</div>
-    </div>
-    <div class="stat-card">
-        <div class="stat-value">{{ stats.gpx_files }}</div>
-        <div class="stat-label">GPX Files</div>
-    </div>
-    <div class="stat-card">
-        <div class="stat-value">{{ stats.fit_files }}</div>
-        <div class="stat-label">FIT Files</div>
     </div>
 </div>
 

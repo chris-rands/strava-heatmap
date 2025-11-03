@@ -34,32 +34,43 @@ class CoordinateCache:
         key_string = f"{data_directory}_{file_count}_{latest_mtime}"
         return hashlib.md5(key_string.encode()).hexdigest()
 
-    def get(self, data_directory: str) -> Optional[List[Tuple[float, float]]]:
-        """Retrieve cached coordinates if available."""
+    def get(self, data_directory: str) -> Optional[dict]:
+        """Retrieve cached data if available."""
         cache_key = self._get_cache_key(data_directory)
         cache_file = self.cache_dir / f"{cache_key}.pkl"
 
         if cache_file.exists():
             try:
                 with open(cache_file, 'rb') as f:
-                    coords = pickle.load(f)
-                logger.info(f"Loaded {len(coords):,} coordinates from cache")
-                return coords
+                    cache_data = pickle.load(f)
+
+                # Handle old cache format (just coordinates)
+                if isinstance(cache_data, list):
+                    logger.info(f"Loaded {len(cache_data):,} coordinates from cache (old format)")
+                    return {'coordinates': cache_data, 'activities': []}
+
+                # New format with activities
+                logger.info(f"Loaded {len(cache_data.get('coordinates', [])):,} coordinates and {len(cache_data.get('activities', []))} activities from cache")
+                return cache_data
             except Exception as e:
                 logger.error(f"Error loading cache: {e}")
                 return None
 
         return None
 
-    def set(self, data_directory: str, coordinates: List[Tuple[float, float]]) -> None:
-        """Save coordinates to cache."""
+    def set(self, data_directory: str, coordinates: List[Tuple[float, float]], activities: list = None) -> None:
+        """Save coordinates and activities to cache."""
         cache_key = self._get_cache_key(data_directory)
         cache_file = self.cache_dir / f"{cache_key}.pkl"
 
         try:
+            cache_data = {
+                'coordinates': coordinates,
+                'activities': activities or []
+            }
             with open(cache_file, 'wb') as f:
-                pickle.dump(coordinates, f)
-            logger.info(f"Saved {len(coordinates):,} coordinates to cache")
+                pickle.dump(cache_data, f)
+            logger.info(f"Saved {len(coordinates):,} coordinates and {len(activities or [])} activities to cache")
         except Exception as e:
             logger.error(f"Error saving cache: {e}")
 

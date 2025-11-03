@@ -40,9 +40,9 @@ def heatmap():
 
     try:
         # Check cache first
-        coordinates = cache.get(data_dir)
+        cache_data = cache.get(data_dir)
 
-        if coordinates is None:
+        if cache_data is None:
             # Parse activities if not cached
             logger.info("No cache found, parsing all activities...")
             parser = StravaDataParser(data_dir)
@@ -53,12 +53,14 @@ def heatmap():
                 return redirect(url_for('index'))
 
             # Save to cache
-            cache.set(data_dir, coordinates)
+            cache.set(data_dir, coordinates, parser.activities)
         else:
-            logger.info(f"Using cached data with {len(coordinates):,} coordinates")
-            # Still need parser for stats
+            logger.info(f"Using cached data with {len(cache_data['coordinates']):,} coordinates")
+            # Load from cache
             parser = StravaDataParser(data_dir)
-            parser.coordinates = coordinates
+            parser.coordinates = cache_data['coordinates']
+            parser.activities = cache_data['activities']
+            coordinates = cache_data['coordinates']
 
         # Get stats
         stats = parser.get_activity_stats()
@@ -93,18 +95,19 @@ def stats():
 
     try:
         # Check cache first
-        coordinates = cache.get(data_dir)
+        cache_data = cache.get(data_dir)
 
-        if coordinates is None:
+        if cache_data is None:
             # Parse if not cached
             logger.info("No cache found, parsing all activities...")
             parser = StravaDataParser(data_dir)
             coordinates = parser.parse_all_activities()
-            cache.set(data_dir, coordinates)
+            cache.set(data_dir, coordinates, parser.activities)
         else:
             logger.info(f"Using cached data")
             parser = StravaDataParser(data_dir)
-            parser.coordinates = coordinates
+            parser.coordinates = cache_data['coordinates']
+            parser.activities = cache_data['activities']
 
         stats = parser.get_activity_stats()
         return render_template('stats.html', stats=stats)
