@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Strava Activity Heatmap</h1>
+<p class="subtitle">Visualize your running activities on an interactive map</p>
+
+<div style="margin-top: 30px;">
+    <h2 style="color: #333; margin-bottom: 20px;">Getting Started</h2>
+
+    <div style="background: #f5f5f5; padding: 20px; border-radius: 5px; margin-bottom: 20px;">
+        <h3 style="margin-bottom: 10px;">Step 1: Download Your Strava Data</h3>
+        <p style="color: #666; line-height: 1.6;">
+            1. Go to <a href="https://www.strava.com/settings/profile" target="_blank" style="color: #667eea;">Strava Settings</a><br>
+            2. Click "My Account" in the left sidebar<br>
+            3. Scroll down to "Download or Delete Your Account"<br>
+            4. Request your archive and download it when ready
+        </p>
+    </div>
+
+    <div style="background: #f5f5f5; padding: 20px; border-radius: 5px; margin-bottom: 30px;">
+        <h3 style="margin-bottom: 10px;">Step 2: Extract Your Data</h3>
+        <p style="color: #666; line-height: 1.6;">
+            Extract the downloaded ZIP file to a folder on your computer.<br>
+            The activities folder will contain your GPX/FIT/TCX files.
+        </p>
+    </div>
+
+    <form action="{{ url_for('heatmap') }}" method="get">
+        <label for="data_dir">Step 3: Enter the path to your activities folder:</label>
+        <input type="text"
+               id="data_dir"
+               name="data_dir"
+               value="{{ data_dir }}"
+               placeholder="e.g., ./data/activities or /path/to/your/strava/export/activities">
+
+        <button type="submit" class="btn">Generate Heatmap</button>
+    </form>
+
+    <div style="margin-top: 30px; padding: 20px; background: #e8f4f8; border-radius: 5px;">
+        <h3 style="color: #333; margin-bottom: 10px;">Tips:</h3>
+        <ul style="color: #666; line-height: 1.8; margin-left: 20px;">
+            <li>Make sure the path points to the "activities" folder in your Strava export</li>
+            <li>The folder should contain .gpx, .fit, or .tcx files</li>
+            <li>Processing may take a few seconds if you have many activities</li>
+            <li>The heatmap will show all your activities combined</li>
+        </ul>
+    </div>
+</div>
+{% endblock %}

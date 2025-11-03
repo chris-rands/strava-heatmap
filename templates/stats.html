@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+
+{% block extra_css %}
+<style>
+    .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+        gap: 20px;
+        margin-top: 30px;
+    }
+
+    .stat-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 30px;
+        border-radius: 8px;
+        color: white;
+        text-align: center;
+    }
+
+    .stat-value {
+        font-size: 3em;
+        font-weight: bold;
+        margin-bottom: 10px;
+    }
+
+    .stat-label {
+        font-size: 1.1em;
+        opacity: 0.9;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1>Activity Statistics</h1>
+<p class="subtitle">Overview of your Strava data</p>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.total_activities }}</div>
+        <div class="stat-label">Total Activities</div>
+    </div>
+
+    <div class="stat-card">
+        <div class="stat-value">{{ "{:,}".format(stats.total_coordinates) }}</div>
+        <div class="stat-label">GPS Data Points</div>
+    </div>
+
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.gpx_files }}</div>
+        <div class="stat-label">GPX Files</div>
+    </div>
+
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.fit_files }}</div>
+        <div class="stat-label">FIT Files</div>
+    </div>
+
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.tcx_files }}</div>
+        <div class="stat-label">TCX Files</div>
+    </div>
+</div>
+
+<div style="margin-top: 30px; text-align: center;">
+    <a href="{{ url_for('heatmap') }}" class="btn">View Heatmap</a>
+</div>
+{% endblock %}
