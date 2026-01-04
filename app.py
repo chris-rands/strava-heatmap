@@ -52,14 +52,15 @@ def heatmap():
                 flash('No activity data found in the directory', 'warning')
                 return redirect(url_for('index'))
 
-            # Save to cache
-            cache.set(data_dir, coordinates, parser.activities)
+            # Save to cache (including file counts)
+            cache.set(data_dir, coordinates, parser.activities, parser._file_counts)
         else:
             logger.info(f"Using cached data with {len(cache_data['coordinates']):,} coordinates")
             # Load from cache
             parser = StravaDataParser(data_dir)
             parser.coordinates = cache_data['coordinates']
             parser.activities = cache_data['activities']
+            parser._file_counts = cache_data.get('file_counts')
             coordinates = cache_data['coordinates']
 
         # Get stats
@@ -102,12 +103,13 @@ def stats():
             logger.info("No cache found, parsing all activities...")
             parser = StravaDataParser(data_dir)
             coordinates = parser.parse_all_activities()
-            cache.set(data_dir, coordinates, parser.activities)
+            cache.set(data_dir, coordinates, parser.activities, parser._file_counts)
         else:
             logger.info(f"Using cached data")
             parser = StravaDataParser(data_dir)
             parser.coordinates = cache_data['coordinates']
             parser.activities = cache_data['activities']
+            parser._file_counts = cache_data.get('file_counts')
 
         stats = parser.get_activity_stats()
         return render_template('stats.html', stats=stats)

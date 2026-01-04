@@ -20,12 +20,13 @@ class CoordinateCache:
         """Generate cache key based on directory path and file count."""
         data_path = Path(data_directory)
 
-        # Get file counts and timestamps
+        # Get file counts and timestamps (include all supported formats)
         gpx_files = list(data_path.rglob("*.gpx"))
         fit_files = list(data_path.rglob("*.fit"))
         fit_gz_files = list(data_path.rglob("*.fit.gz"))
+        tcx_files = list(data_path.rglob("*.tcx"))
 
-        all_files = gpx_files + fit_files + fit_gz_files
+        all_files = gpx_files + fit_files + fit_gz_files + tcx_files
 
         # Create key from path, file count, and latest modification time
         file_count = len(all_files)
@@ -58,15 +59,16 @@ class CoordinateCache:
 
         return None
 
-    def set(self, data_directory: str, coordinates: List[Tuple[float, float]], activities: list = None) -> None:
-        """Save coordinates and activities to cache."""
+    def set(self, data_directory: str, coordinates: List[Tuple[float, float]], activities: list = None, file_counts: dict = None) -> None:
+        """Save coordinates, activities, and file counts to cache."""
         cache_key = self._get_cache_key(data_directory)
         cache_file = self.cache_dir / f"{cache_key}.pkl"
 
         try:
             cache_data = {
                 'coordinates': coordinates,
-                'activities': activities or []
+                'activities': activities or [],
+                'file_counts': file_counts
             }
             with open(cache_file, 'wb') as f:
                 pickle.dump(cache_data, f)

@@ -9,6 +9,7 @@ from fitparse import FitFile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import List, Tuple, Dict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import gzip
 
@@ -29,6 +30,7 @@ class StravaDataParser:
         self.data_directory = Path(data_directory)
         self.coordinates = []
         self.activities = []  # Store activity metadata
+        self._file_counts = None  # Cache file counts to avoid rescanning
 
     def parse_gpx_file(self, file_path: Path) -> List[Tuple[float, float]]:
         """
@@ -197,9 +199,27 @@ class StravaDataParser:
 
         return coords
 
-    def parse_all_activities(self) -> List[Tuple[float, float]]:
+    def _parse_file(self, file_path: Path) -> Tuple[List[Tuple[float, float]], dict]:
+        """Parse a single file and return coords + activity metadata."""
+        suffix = file_path.suffix.lower()
+        if suffix == '.gpx':
+            coords = self.parse_gpx_file(file_path)
+        elif suffix == '.fit' or str(file_path).endswith('.fit.gz'):
+            coords = self.parse_fit_file(file_path)
+        elif suffix == '.tcx':
+            coords = self.parse_tcx_file(file_path)
+        else:
+            coords = []
+        # Return the last activity added (if any)
+        activity = self.activities[-1] if self.activities else None
+        return coords, activity
+
+    def parse_all_activities(self, max_workers: int = 4) -> List[Tuple[float, float]]:
         """
-        Parse all activity files in the data directory.
+        Parse all activity files in the data directory using parallel processing.
+
+        Args:
+            max_workers: Number of parallel threads for parsing (default 4)
 
         Returns:
             List of all (latitude, longitude) tuples from all activities
@@ -210,39 +230,169 @@ class StravaDataParser:
             logger.error(f"Data directory does not exist: {self.data_directory}")
             return all_coords
 
-        # Find all activity files
+        # Find all activity files (single scan, reuse for stats)
         gpx_files = list(self.data_directory.rglob("*.gpx"))
         fit_files = list(self.data_directory.rglob("*.fit"))
         fit_gz_files = list(self.data_directory.rglob("*.fit.gz"))
         tcx_files = list(self.data_directory.rglob("*.tcx"))
 
+        # Cache file counts to avoid rescanning in get_activity_stats()
+        self._file_counts = {
+            'gpx': len(gpx_files),
+            'fit': len(fit_files),
+            'fit_gz': len(fit_gz_files),
+            'tcx': len(tcx_files)
+        }
+
         total_fit = len(fit_files) + len(fit_gz_files)
         logger.info(f"Found {len(gpx_files)} GPX, {total_fit} FIT ({len(fit_files)} .fit, {len(fit_gz_files)} .fit.gz), {len(tcx_files)} TCX files")
 
-        # Parse GPX files
-        for gpx_file in gpx_files:
-            coords = self.parse_gpx_file(gpx_file)
-            all_coords.extend(coords)
+        all_files = gpx_files + fit_files + fit_gz_files + tcx_files
 
-        # Parse FIT files
-        for fit_file in fit_files:
-            coords = self.parse_fit_file(fit_file)
-            all_coords.extend(coords)
-
-        # Parse compressed FIT files
-        for fit_file in fit_gz_files:
-            coords = self.parse_fit_file(fit_file)
-            all_coords.extend(coords)
-
-        # Parse TCX files
-        for tcx_file in tcx_files:
-            coords = self.parse_tcx_file(tcx_file)
-            all_coords.extend(coords)
+        # Use thread pool for I/O-bound parsing
+        if len(all_files) > 10:
+            # Parallel parsing for larger datasets
+            self.activities = []  # Reset before parallel parsing
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(self._parse_single_file, f): f for f in all_files}
+                for future in as_completed(futures):
+                    coords, activity = future.result()
+                    all_coords.extend(coords)
+                    if activity:
+                        self.activities.append(activity)
+        else:
+            # Sequential for small datasets (less overhead)
+            for f in all_files:
+                coords, activity = self._parse_single_file(f)
+                all_coords.extend(coords)
+                if activity:
+                    self.activities.append(activity)
 
         logger.info(f"Total coordinates extracted: {len(all_coords)}")
         self.coordinates = all_coords
 
         return all_coords
+
+    def _parse_single_file(self, file_path: Path) -> Tuple[List[Tuple[float, float]], dict]:
+        """Parse a single file in isolation (thread-safe)."""
+        suffix = file_path.suffix.lower()
+        coords = []
+        activity = None
+
+        try:
+            if suffix == '.gpx':
+                coords, activity = self._parse_gpx_isolated(file_path)
+            elif suffix == '.fit' or str(file_path).endswith('.fit.gz'):
+                coords, activity = self._parse_fit_isolated(file_path)
+            elif suffix == '.tcx':
+                coords, activity = self._parse_tcx_isolated(file_path)
+        except Exception as e:
+            logger.error(f"Error parsing {file_path}: {e}")
+
+        return coords, activity
+
+    def _parse_gpx_isolated(self, file_path: Path) -> Tuple[List[Tuple[float, float]], dict]:
+        """Thread-safe GPX parsing."""
+        coords = []
+        with open(file_path, 'r') as gpx_file:
+            gpx = gpxpy.parse(gpx_file)
+            for track in gpx.tracks:
+                for segment in track.segments:
+                    for point in segment.points:
+                        coords.append((point.latitude, point.longitude))
+
+            total_distance = gpx.length_3d() if gpx.length_3d() else gpx.length_2d()
+            total_duration = 0
+            time_bounds = gpx.get_time_bounds()
+            if time_bounds.start_time and time_bounds.end_time:
+                total_duration = (time_bounds.end_time - time_bounds.start_time).total_seconds()
+
+        activity = {
+            'filename': file_path.name,
+            'type': 'gpx',
+            'distance_m': total_distance,
+            'duration_s': total_duration,
+            'points': len(coords)
+        }
+        logger.info(f"Parsed {len(coords)} points from {file_path.name}")
+        return coords, activity
+
+    def _parse_fit_isolated(self, file_path: Path) -> Tuple[List[Tuple[float, float]], dict]:
+        """Thread-safe FIT parsing."""
+        coords = []
+        total_distance = 0
+        total_duration = 0
+
+        if str(file_path).endswith('.gz'):
+            with gzip.open(file_path, 'rb') as f:
+                fitfile = FitFile(f)
+                coords, total_distance, total_duration = self._extract_fit_data(fitfile)
+        else:
+            fitfile = FitFile(str(file_path))
+            coords, total_distance, total_duration = self._extract_fit_data(fitfile)
+
+        activity = {
+            'filename': file_path.name,
+            'type': 'fit',
+            'distance_m': total_distance,
+            'duration_s': total_duration,
+            'points': len(coords)
+        }
+        logger.info(f"Parsed {len(coords)} points from {file_path.name}")
+        return coords, activity
+
+    def _extract_fit_data(self, fitfile: FitFile) -> Tuple[List[Tuple[float, float]], float, float]:
+        """Extract coords and metadata from FIT file."""
+        coords = []
+        total_distance = 0
+        total_duration = 0
+
+        for session in fitfile.get_messages('session'):
+            for data in session:
+                if data.name == 'total_distance':
+                    total_distance = data.value if data.value else 0
+                elif data.name == 'total_elapsed_time':
+                    total_duration = data.value if data.value else 0
+
+        for record in fitfile.get_messages('record'):
+            lat = None
+            lon = None
+            for data in record:
+                if data.name == 'position_lat':
+                    lat = data.value
+                elif data.name == 'position_long':
+                    lon = data.value
+            if lat is not None and lon is not None:
+                lat_deg = lat * (180 / 2**31)
+                lon_deg = lon * (180 / 2**31)
+                coords.append((lat_deg, lon_deg))
+
+        return coords, total_distance, total_duration
+
+    def _parse_tcx_isolated(self, file_path: Path) -> Tuple[List[Tuple[float, float]], dict]:
+        """Thread-safe TCX parsing."""
+        coords = []
+        tree = ET.parse(file_path)
+        root = tree.getroot()
+        ns = {'tcx': 'http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2'}
+
+        for trackpoint in root.findall('.//tcx:Trackpoint', ns):
+            position = trackpoint.find('tcx:Position', ns)
+            if position is not None:
+                lat_elem = position.find('tcx:LatitudeDegrees', ns)
+                lon_elem = position.find('tcx:LongitudeDegrees', ns)
+                if lat_elem is not None and lon_elem is not None:
+                    coords.append((float(lat_elem.text), float(lon_elem.text)))
+
+        activity = {
+            'filename': file_path.name,
+            'type': 'tcx',
+            'distance_m': 0,
+            'duration_s': 0,
+            'points': len(coords)
+        }
+        logger.info(f"Parsed {len(coords)} points from {file_path.name}")
+        return coords, activity
 
     def get_activity_stats(self) -> Dict:
         """
@@ -251,10 +401,17 @@ class StravaDataParser:
         Returns:
             Dictionary with activity counts, distances, durations, etc.
         """
-        gpx_count = len(list(self.data_directory.rglob("*.gpx")))
-        fit_count = len(list(self.data_directory.rglob("*.fit")))
-        fit_gz_count = len(list(self.data_directory.rglob("*.fit.gz")))
-        tcx_count = len(list(self.data_directory.rglob("*.tcx")))
+        # Use cached file counts if available, otherwise scan
+        if self._file_counts:
+            gpx_count = self._file_counts['gpx']
+            fit_count = self._file_counts['fit']
+            fit_gz_count = self._file_counts['fit_gz']
+            tcx_count = self._file_counts['tcx']
+        else:
+            gpx_count = len(list(self.data_directory.rglob("*.gpx")))
+            fit_count = len(list(self.data_directory.rglob("*.fit")))
+            fit_gz_count = len(list(self.data_directory.rglob("*.fit.gz")))
+            tcx_count = len(list(self.data_directory.rglob("*.tcx")))
 
         total_fit = fit_count + fit_gz_count
 
