@@ -180,4 +180,4 @@ All data processing happens locally on your computer. Your Strava data is never 
 
 ## License
 
-This project is provided as-is for personal use.
+This project is licensed under the [MIT License](LICENSE).
