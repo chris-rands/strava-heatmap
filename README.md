@@ -19,7 +19,7 @@ An interactive web application that visualizes your Strava running activities as
 
 1. Clone or navigate to this directory:
 ```bash
-cd strava_heatmap
+cd strava-heatmap
 ```
 
 2. Create and activate a virtual environment:
@@ -67,7 +67,7 @@ http://localhost:5000
 ## Project Structure
 
 ```
-strava_heatmap/
+strava-heatmap/
 ├── app.py              # Flask web application
 ├── parser.py           # Data parsing module (GPX, FIT, TCX)
 ├── heatmap.py          # Heatmap visualization module
