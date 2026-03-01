@@ -116,7 +116,7 @@ def export():
     from static_export import create_static_heatmap
 
     data_dir = request.args.get('data_dir', DATA_DIR)
-    n_panels = int(request.args.get('panels', 4))
+    n_panels = int(request.args.get('panels', 2))
     fmt = request.args.get('format', 'png')
 
     if fmt not in ('png', 'jpeg'):

@@ -17,10 +17,12 @@ class CoordinateCache:
         self.cache_dir.mkdir(exist_ok=True)
 
     def _get_cache_key(self, data_directory: str) -> str:
-        """Generate cache key based on directory path, file count, and directory mtime.
+        """Generate cache key based on resolved directory path and file count.
 
-        Uses a single stat() on the directory instead of scanning every file.
-        Adding or removing a file changes both the count and the directory mtime.
+        Adding or removing activity files changes the count, which
+        invalidates the cache.  The resolved path ensures that
+        ``./data``, ``data``, and the absolute path all hit the same
+        cache entry.
         """
         data_path = Path(data_directory).resolve()
 
@@ -33,10 +35,7 @@ class CoordinateCache:
             if entry.suffix.lower() in supported or entry.name.lower().endswith('.fit.gz'):
                 file_count += 1
 
-        # Directory mtime changes when files are added/removed
-        dir_mtime = data_path.stat().st_mtime
-
-        key_string = f"{data_directory}_{file_count}_{dir_mtime}"
+        key_string = f"{data_path}_{file_count}"
         return hashlib.md5(key_string.encode()).hexdigest()
 
     def get(self, data_directory: str) -> Optional[dict]:
