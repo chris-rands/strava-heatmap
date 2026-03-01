@@ -128,6 +128,7 @@
         <div class="nav">
             <a href="{{ url_for('index') }}">Home</a>
             <a href="{{ url_for('stats') }}">Statistics</a>
+            <a href="{{ url_for('export') }}">Export Image</a>
         </div>
 
         {% with messages = get_flashed_messages(with_categories=true) %}

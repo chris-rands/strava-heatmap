@@ -2,11 +2,12 @@
 Flask web application for Strava activity heatmap.
 """
 
-from flask import Flask, render_template, request, redirect, url_for, flash
+from flask import Flask, render_template, request, redirect, url_for, flash, send_file
 from parser import StravaDataParser
 from heatmap import StravaHeatmap
 from cache import CoordinateCache
 import os
+import tempfile
 from pathlib import Path
 import logging
 
@@ -106,6 +107,55 @@ def stats():
     except Exception as e:
         logger.error(f"Error getting stats: {e}")
         flash(f'Error getting stats: {str(e)}', 'error')
+        return redirect(url_for('index'))
+
+
+@app.route('/export')
+def export():
+    """Generate and download a static heatmap image."""
+    from static_export import create_static_heatmap
+
+    data_dir = request.args.get('data_dir', DATA_DIR)
+    n_panels = int(request.args.get('panels', 4))
+    fmt = request.args.get('format', 'png')
+
+    if fmt not in ('png', 'jpeg'):
+        flash('Invalid format. Use png or jpeg.', 'error')
+        return redirect(url_for('index'))
+
+    if not os.path.exists(data_dir):
+        flash(f'Data directory not found: {data_dir}', 'error')
+        return redirect(url_for('index'))
+
+    try:
+        parser, coordinates = _load_or_parse(data_dir)
+
+        if not coordinates:
+            flash('No activity data found in the directory', 'warning')
+            return redirect(url_for('index'))
+
+        ext = 'jpg' if fmt == 'jpeg' else fmt
+        tmp = tempfile.NamedTemporaryFile(suffix=f'.{ext}', delete=False)
+        tmp.close()
+
+        create_static_heatmap(
+            coordinates,
+            output_path=tmp.name,
+            n_panels=n_panels,
+            fmt=fmt,
+        )
+
+        mimetype = 'image/png' if fmt == 'png' else 'image/jpeg'
+        return send_file(
+            tmp.name,
+            mimetype=mimetype,
+            as_attachment=True,
+            download_name=f'strava_heatmap.{ext}',
+        )
+
+    except Exception as e:
+        logger.error(f"Error exporting heatmap: {e}")
+        flash(f'Error exporting heatmap: {str(e)}', 'error')
         return redirect(url_for('index'))
 
 
