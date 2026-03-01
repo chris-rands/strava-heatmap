@@ -3,6 +3,8 @@ Parser module for Strava activity data.
 Supports GPX, FIT, and TCX file formats.
 """
 
+import math
+
 import gpxpy
 import gpxpy.gpx
 from fitparse import FitFile
@@ -20,198 +22,62 @@ logger = logging.getLogger(__name__)
 class StravaDataParser:
     """Parse Strava export data files."""
 
-    def __init__(self, data_directory: str):
+    def __init__(self, data_directory: str, min_distance_m: float = 10.0):
         """
         Initialize parser with data directory.
 
         Args:
             data_directory: Path to directory containing Strava export files
+            min_distance_m: Minimum distance in metres between kept GPS points.
+                            Points closer than this to the previous kept point
+                            are dropped. Set to 0 to keep all points.
         """
         self.data_directory = Path(data_directory)
+        self.min_distance_m = min_distance_m
         self.coordinates = []
         self.activities = []  # Store activity metadata
         self._file_counts = None  # Cache file counts to avoid rescanning
 
-    def parse_gpx_file(self, file_path: Path) -> List[Tuple[float, float]]:
+    @staticmethod
+    def _downsample(coords: List[Tuple[float, float]], min_distance_m: float) -> List[Tuple[float, float]]:
+        """Drop points that are within *min_distance_m* of the previous kept point.
+
+        Uses a fast equirectangular approximation (good enough for short distances).
         """
-        Parse GPX file and extract coordinates.
+        if min_distance_m <= 0 or len(coords) <= 1:
+            return coords
 
-        Args:
-            file_path: Path to GPX file
+        kept = [coords[0]]
+        prev_lat, prev_lon = coords[0]
+        threshold_sq = min_distance_m ** 2
 
-        Returns:
-            List of (latitude, longitude) tuples
-        """
-        coords = []
-        try:
-            with open(file_path, 'r') as gpx_file:
-                gpx = gpxpy.parse(gpx_file)
+        m_per_deg_lat = 111_320.0
+        cos_lat = math.cos(math.radians(prev_lat))
+        m_per_deg_lon = m_per_deg_lat * cos_lat
 
-                # Extract activity metadata
-                total_distance = 0
-                total_duration = 0
+        for lat, lon in coords[1:]:
+            dlat = (lat - prev_lat) * m_per_deg_lat
+            dlon = (lon - prev_lon) * m_per_deg_lon
+            if dlat * dlat + dlon * dlon >= threshold_sq:
+                kept.append((lat, lon))
+                prev_lat, prev_lon = lat, lon
 
-                for track in gpx.tracks:
-                    for segment in track.segments:
-                        for point in segment.points:
-                            coords.append((point.latitude, point.longitude))
+        return kept
 
-                # Calculate distance and duration using gpxpy
-                total_distance = gpx.length_3d() if gpx.length_3d() else gpx.length_2d()
-
-                # Get time bounds
-                time_bounds = gpx.get_time_bounds()
-                if time_bounds.start_time and time_bounds.end_time:
-                    total_duration = (time_bounds.end_time - time_bounds.start_time).total_seconds()
-
-                # Store activity metadata
-                self.activities.append({
-                    'filename': file_path.name,
-                    'type': 'gpx',
-                    'distance_m': total_distance,
-                    'duration_s': total_duration,
-                    'points': len(coords)
-                })
-
-                logger.info(f"Parsed {len(coords)} points from {file_path.name}")
-        except Exception as e:
-            logger.error(f"Error parsing GPX file {file_path}: {e}")
-
-        return coords
-
-    def parse_fit_file(self, file_path: Path) -> List[Tuple[float, float]]:
-        """
-        Parse FIT file and extract coordinates.
-        Handles both .fit and .fit.gz (compressed) files.
-
-        Args:
-            file_path: Path to FIT file
-
-        Returns:
-            List of (latitude, longitude) tuples
-        """
-        coords = []
-        try:
-            # Check if file is gzipped
-            if str(file_path).endswith('.gz'):
-                with gzip.open(file_path, 'rb') as f:
-                    fitfile = FitFile(f)
-                    coords = self._extract_fit_coordinates(fitfile, file_path.name)
-            else:
-                fitfile = FitFile(str(file_path))
-                coords = self._extract_fit_coordinates(fitfile, file_path.name)
-
-        except Exception as e:
-            logger.error(f"Error parsing FIT file {file_path}: {e}")
-
-        return coords
-
-    def _extract_fit_coordinates(self, fitfile: FitFile, filename: str) -> List[Tuple[float, float]]:
-        """
-        Extract coordinates from a FitFile object.
-
-        Args:
-            fitfile: FitFile object
-            filename: Name of the file being parsed
-
-        Returns:
-            List of (latitude, longitude) tuples
-        """
-        coords = []
-        total_distance = 0
-        total_duration = 0
-        start_time = None
-        end_time = None
-
-        # Get session data for distance and duration
-        for session in fitfile.get_messages('session'):
-            for data in session:
-                if data.name == 'total_distance':
-                    total_distance = data.value if data.value else 0
-                elif data.name == 'total_elapsed_time':
-                    total_duration = data.value if data.value else 0
-                elif data.name == 'start_time':
-                    start_time = data.value
-                elif data.name == 'timestamp':
-                    end_time = data.value
-
-        # Extract coordinates
-        for record in fitfile.get_messages('record'):
-            lat = None
-            lon = None
-
-            for data in record:
-                if data.name == 'position_lat':
-                    lat = data.value
-                elif data.name == 'position_long':
-                    lon = data.value
-
-            if lat is not None and lon is not None:
-                # Convert semicircles to degrees
-                lat_deg = lat * (180 / 2**31)
-                lon_deg = lon * (180 / 2**31)
-                coords.append((lat_deg, lon_deg))
-
-        # Store activity metadata
-        self.activities.append({
-            'filename': filename,
-            'type': 'fit',
-            'distance_m': total_distance,
-            'duration_s': total_duration,
-            'points': len(coords)
-        })
-
-        logger.info(f"Parsed {len(coords)} points from {filename}")
-        return coords
-
-    def parse_tcx_file(self, file_path: Path) -> List[Tuple[float, float]]:
-        """
-        Parse TCX file and extract coordinates.
-
-        Args:
-            file_path: Path to TCX file
-
-        Returns:
-            List of (latitude, longitude) tuples
-        """
-        coords = []
-        try:
-            tree = ET.parse(file_path)
-            root = tree.getroot()
-
-            # TCX namespace
-            ns = {'tcx': 'http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2'}
-
-            for trackpoint in root.findall('.//tcx:Trackpoint', ns):
-                position = trackpoint.find('tcx:Position', ns)
-                if position is not None:
-                    lat_elem = position.find('tcx:LatitudeDegrees', ns)
-                    lon_elem = position.find('tcx:LongitudeDegrees', ns)
-
-                    if lat_elem is not None and lon_elem is not None:
-                        lat = float(lat_elem.text)
-                        lon = float(lon_elem.text)
-                        coords.append((lat, lon))
-
-            logger.info(f"Parsed {len(coords)} points from {file_path.name}")
-        except Exception as e:
-            logger.error(f"Error parsing TCX file {file_path}: {e}")
-
-        return coords
-
-    def _parse_file(self, file_path: Path) -> Tuple[List[Tuple[float, float]], dict]:
-        """Parse a single file and return coords + activity metadata."""
-        suffix = file_path.suffix.lower()
-        if suffix == '.gpx':
-            coords = self.parse_gpx_file(file_path)
-        elif suffix == '.fit' or str(file_path).endswith('.fit.gz'):
-            coords = self.parse_fit_file(file_path)
-        elif suffix == '.tcx':
-            coords = self.parse_tcx_file(file_path)
-        else:
-            coords = []
-        # Return the last activity added (if any)
-        activity = self.activities[-1] if self.activities else None
+    def _finalize_coords(self, coords: List[Tuple[float, float]], file_path: Path,
+                         file_type: str, distance_m: float = 0, duration_s: float = 0
+                         ) -> Tuple[List[Tuple[float, float]], dict]:
+        """Downsample coordinates, build activity metadata, and log."""
+        raw_count = len(coords)
+        coords = self._downsample(coords, self.min_distance_m)
+        activity = {
+            'filename': file_path.name,
+            'type': file_type,
+            'distance_m': distance_m,
+            'duration_s': duration_s,
+            'points': raw_count,
+        }
+        logger.info(f"Parsed {raw_count} points from {file_path.name} (kept {len(coords)} after downsampling)")
         return coords, activity
 
     def parse_all_activities(self, max_workers: int = 4) -> List[Tuple[float, float]]:
@@ -301,28 +167,17 @@ class StravaDataParser:
                     for point in segment.points:
                         coords.append((point.latitude, point.longitude))
 
-            total_distance = gpx.length_3d() if gpx.length_3d() else gpx.length_2d()
+            length_3d = gpx.length_3d()
+            total_distance = length_3d if length_3d else gpx.length_2d()
             total_duration = 0
             time_bounds = gpx.get_time_bounds()
             if time_bounds.start_time and time_bounds.end_time:
                 total_duration = (time_bounds.end_time - time_bounds.start_time).total_seconds()
 
-        activity = {
-            'filename': file_path.name,
-            'type': 'gpx',
-            'distance_m': total_distance,
-            'duration_s': total_duration,
-            'points': len(coords)
-        }
-        logger.info(f"Parsed {len(coords)} points from {file_path.name}")
-        return coords, activity
+        return self._finalize_coords(coords, file_path, 'gpx', total_distance, total_duration)
 
     def _parse_fit_isolated(self, file_path: Path) -> Tuple[List[Tuple[float, float]], dict]:
         """Thread-safe FIT parsing."""
-        coords = []
-        total_distance = 0
-        total_duration = 0
-
         if str(file_path).endswith('.gz'):
             with gzip.open(file_path, 'rb') as f:
                 fitfile = FitFile(f)
@@ -331,15 +186,7 @@ class StravaDataParser:
             fitfile = FitFile(str(file_path))
             coords, total_distance, total_duration = self._extract_fit_data(fitfile)
 
-        activity = {
-            'filename': file_path.name,
-            'type': 'fit',
-            'distance_m': total_distance,
-            'duration_s': total_duration,
-            'points': len(coords)
-        }
-        logger.info(f"Parsed {len(coords)} points from {file_path.name}")
-        return coords, activity
+        return self._finalize_coords(coords, file_path, 'fit', total_distance, total_duration)
 
     def _extract_fit_data(self, fitfile: FitFile) -> Tuple[List[Tuple[float, float]], float, float]:
         """Extract coords and metadata from FIT file."""
@@ -384,15 +231,7 @@ class StravaDataParser:
                 if lat_elem is not None and lon_elem is not None:
                     coords.append((float(lat_elem.text), float(lon_elem.text)))
 
-        activity = {
-            'filename': file_path.name,
-            'type': 'tcx',
-            'distance_m': 0,
-            'duration_s': 0,
-            'points': len(coords)
-        }
-        logger.info(f"Parsed {len(coords)} points from {file_path.name}")
-        return coords, activity
+        return self._finalize_coords(coords, file_path, 'tcx')
 
     def get_activity_stats(self) -> Dict:
         """

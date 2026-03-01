@@ -17,22 +17,26 @@ class CoordinateCache:
         self.cache_dir.mkdir(exist_ok=True)
 
     def _get_cache_key(self, data_directory: str) -> str:
-        """Generate cache key based on directory path and file count."""
+        """Generate cache key based on directory path, file count, and directory mtime.
+
+        Uses a single stat() on the directory instead of scanning every file.
+        Adding or removing a file changes both the count and the directory mtime.
+        """
         data_path = Path(data_directory)
 
-        # Get file counts and timestamps (include all supported formats)
-        gpx_files = list(data_path.rglob("*.gpx"))
-        fit_files = list(data_path.rglob("*.fit"))
-        fit_gz_files = list(data_path.rglob("*.fit.gz"))
-        tcx_files = list(data_path.rglob("*.tcx"))
+        # Count activity files with a single directory walk
+        supported = {'.gpx', '.fit', '.tcx'}
+        file_count = 0
+        for entry in data_path.rglob("*"):
+            if not entry.is_file():
+                continue
+            if entry.suffix.lower() in supported or entry.name.lower().endswith('.fit.gz'):
+                file_count += 1
 
-        all_files = gpx_files + fit_files + fit_gz_files + tcx_files
+        # Directory mtime changes when files are added/removed
+        dir_mtime = data_path.stat().st_mtime
 
-        # Create key from path, file count, and latest modification time
-        file_count = len(all_files)
-        latest_mtime = max((f.stat().st_mtime for f in all_files), default=0)
-
-        key_string = f"{data_directory}_{file_count}_{latest_mtime}"
+        key_string = f"{data_directory}_{file_count}_{dir_mtime}"
         return hashlib.md5(key_string.encode()).hexdigest()
 
     def get(self, data_directory: str) -> Optional[dict]:
