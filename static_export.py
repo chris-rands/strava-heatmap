@@ -43,13 +43,28 @@ def detect_hotspots(
     n_hotspots: int = 4,
     eps_km: float = 2.0,
     min_samples: int = 50,
+    max_cluster_points: int = 20_000,
 ) -> list:
     """Cluster GPS points into geographic hotspots using DBSCAN.
 
-    Returns a list of dicts, each with keys: center, points, bbox.
+    To keep memory usage reasonable, DBSCAN runs on a subsample of
+    points (capped at *max_cluster_points*). The full coordinate set is
+    then assigned to the nearest cluster centre so that bboxes and
+    counts reflect all data.
+
+    Returns a list of dicts, each with keys: center, bbox, count.
     """
     coords = np.array(coordinates)
-    lats, lons = coords[:, 0], coords[:, 1]
+
+    # Subsample for DBSCAN to avoid O(n^2) memory on large datasets
+    if len(coords) > max_cluster_points:
+        rng = np.random.default_rng(42)
+        sample_idx = rng.choice(len(coords), max_cluster_points, replace=False)
+        sample = coords[sample_idx]
+    else:
+        sample = coords
+
+    lats, lons = sample[:, 0], sample[:, 1]
 
     # Equirectangular projection to approximate km
     mean_lat = np.mean(lats)
@@ -59,27 +74,55 @@ def detect_hotspots(
 
     scaled = np.column_stack([lats * km_per_deg_lat, lons * km_per_deg_lon])
 
-    db = DBSCAN(eps=eps_km, min_samples=min_samples).fit(scaled)
+    # Scale min_samples proportionally when subsampled
+    scale_factor = len(sample) / len(coords)
+    adjusted_min_samples = max(5, int(min_samples * scale_factor))
+
+    db = DBSCAN(eps=eps_km, min_samples=adjusted_min_samples).fit(scaled)
     labels = db.labels_
 
     unique_labels = set(labels) - {-1}
     if not unique_labels:
         logger.warning("DBSCAN found no clusters; treating all points as one cluster")
         unique_labels = {0}
-        labels = np.zeros(len(coords), dtype=int)
+        labels = np.zeros(len(sample), dtype=int)
+
+    # Compute cluster centres from the sample
+    centres = []
+    for label in sorted(unique_labels):
+        mask = labels == label
+        pts = sample[mask]
+        centres.append(np.mean(pts, axis=0))
+    centres = np.array(centres)  # shape (n_clusters, 2)
+
+    # Assign ALL points to nearest cluster centre (cheap vectorised op)
+    all_lats, all_lons = coords[:, 0], coords[:, 1]
+    all_scaled = np.column_stack([all_lats * km_per_deg_lat, all_lons * km_per_deg_lon])
+    centres_scaled = np.column_stack([
+        centres[:, 0] * km_per_deg_lat,
+        centres[:, 1] * km_per_deg_lon,
+    ])
+
+    # Compute distances in chunks to avoid a huge (N, K) matrix
+    chunk_size = 50_000
+    full_labels = np.empty(len(coords), dtype=int)
+    for start in range(0, len(coords), chunk_size):
+        end = min(start + chunk_size, len(coords))
+        diffs = all_scaled[start:end, np.newaxis, :] - centres_scaled[np.newaxis, :, :]
+        dists = np.sum(diffs ** 2, axis=2)
+        full_labels[start:end] = np.argmin(dists, axis=1)
 
     clusters = []
-    for label in unique_labels:
-        mask = labels == label
+    for i, label in enumerate(sorted(unique_labels)):
+        mask = full_labels == i
         pts = coords[mask]
-        center = (np.mean(pts[:, 0]), np.mean(pts[:, 1]))
+        center = (centres[i][0], centres[i][1])
         lat_min, lon_min = pts.min(axis=0)
         lat_max, lon_max = pts.max(axis=0)
         clusters.append({
             'center': center,
-            'points': pts,
             'bbox': (lat_min, lat_max, lon_min, lon_max),
-            'count': len(pts),
+            'count': int(mask.sum()),
         })
 
     # Sort by point count descending, take top N
@@ -102,7 +145,6 @@ def detect_hotspots(
         )
         clusters.append({
             'center': base['center'],
-            'points': base['points'],
             'bbox': wider_bbox,
             'count': base['count'],
         })
