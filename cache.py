@@ -22,7 +22,7 @@ class CoordinateCache:
         Uses a single stat() on the directory instead of scanning every file.
         Adding or removing a file changes both the count and the directory mtime.
         """
-        data_path = Path(data_directory)
+        data_path = Path(data_directory).resolve()
 
         # Count activity files with a single directory walk
         supported = {'.gpx', '.fit', '.tcx'}

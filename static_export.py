@@ -4,10 +4,11 @@ running hotspots with dark basemap and heatmap overlay.
 """
 
 import argparse
+import json
 import logging
 import math
-import tempfile
-from pathlib import Path
+import urllib.request
+import urllib.parse
 from typing import List, Tuple, Optional
 
 import numpy as np
@@ -16,6 +17,7 @@ from scipy.ndimage import gaussian_filter
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 import contextily as cx
 
 from parser import StravaDataParser
@@ -24,14 +26,60 @@ from cache import CoordinateCache
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Custom colormap: transparent black → deep orange → bright yellow → white core
+_HEATMAP_COLORS = [
+    (0.0, (0.0, 0.0, 0.0, 0.0)),
+    (0.15, (0.55, 0.05, 0.05, 0.5)),
+    (0.4, (0.9, 0.15, 0.0, 0.75)),
+    (0.65, (1.0, 0.5, 0.0, 0.85)),
+    (0.85, (1.0, 0.85, 0.1, 0.95)),
+    (1.0, (1.0, 1.0, 0.8, 1.0)),
+]
+HEATMAP_CMAP = LinearSegmentedColormap.from_list(
+    'strava_heat',
+    [(pos, rgba[:3]) for pos, rgba in _HEATMAP_COLORS],
+)
+HEATMAP_ALPHA_VALUES = [rgba[3] for _, rgba in _HEATMAP_COLORS]
+
+
+def _reverse_geocode(lat: float, lon: float) -> str:
+    """Get a human-readable place name via Nominatim reverse geocoding."""
+    params = urllib.parse.urlencode({
+        'lat': f'{lat:.5f}',
+        'lon': f'{lon:.5f}',
+        'format': 'json',
+        'zoom': 10,
+        'addressdetails': 1,
+    })
+    url = f'https://nominatim.openstreetmap.org/reverse?{params}'
+    req = urllib.request.Request(url, headers={'User-Agent': 'strava-heatmap-export/1.0'})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+        addr = data.get('address', {})
+        # Try city/town/village, then county, then state
+        name = (
+            addr.get('city')
+            or addr.get('town')
+            or addr.get('village')
+            or addr.get('county')
+            or addr.get('state')
+        )
+        country = addr.get('country_code', '').upper()
+        if name and country:
+            return f'{name}, {country}'
+        if name:
+            return name
+        return data.get('display_name', '').split(',')[0]
+    except Exception as e:
+        logger.warning(f'Reverse geocoding failed for ({lat:.3f}, {lon:.3f}): {e}')
+        return f'{lat:.2f}\u00b0N, {lon:.2f}\u00b0E'
+
 
 def latlon_array_to_mercator(
     lats: np.ndarray, lons: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Convert lat/lon arrays to EPSG:3857 (Web Mercator) coordinates.
-
-    Pure numpy math, no pyproj dependency needed.
-    """
+    """Convert lat/lon arrays to EPSG:3857 (Web Mercator) coordinates."""
     x = lons * 20037508.34 / 180.0
     y = np.log(np.tan((90.0 + lats) * math.pi / 360.0)) / (math.pi / 180.0)
     y = y * 20037508.34 / 180.0
@@ -44,6 +92,8 @@ def detect_hotspots(
     eps_km: float = 2.0,
     min_samples: int = 50,
     max_cluster_points: int = 20_000,
+    total_activities: int = 0,
+    total_distance_km: float = 0.0,
 ) -> list:
     """Cluster GPS points into geographic hotspots using DBSCAN.
 
@@ -52,9 +102,11 @@ def detect_hotspots(
     then assigned to the nearest cluster centre so that bboxes and
     counts reflect all data.
 
-    Returns a list of dicts, each with keys: center, bbox, count.
+    Returns a list of dicts with: center, bbox, count, location,
+    est_runs, est_km.
     """
     coords = np.array(coordinates)
+    total_points = len(coords)
 
     # Subsample for DBSCAN to avoid O(n^2) memory on large datasets
     if len(coords) > max_cluster_points:
@@ -93,9 +145,9 @@ def detect_hotspots(
         mask = labels == label
         pts = sample[mask]
         centres.append(np.mean(pts, axis=0))
-    centres = np.array(centres)  # shape (n_clusters, 2)
+    centres = np.array(centres)
 
-    # Assign ALL points to nearest cluster centre (cheap vectorised op)
+    # Assign ALL points to nearest cluster centre
     all_lats, all_lons = coords[:, 0], coords[:, 1]
     all_scaled = np.column_stack([all_lats * km_per_deg_lat, all_lons * km_per_deg_lon])
     centres_scaled = np.column_stack([
@@ -103,7 +155,6 @@ def detect_hotspots(
         centres[:, 1] * km_per_deg_lon,
     ])
 
-    # Compute distances in chunks to avoid a huge (N, K) matrix
     chunk_size = 50_000
     full_labels = np.empty(len(coords), dtype=int)
     for start in range(0, len(coords), chunk_size):
@@ -116,27 +167,39 @@ def detect_hotspots(
     for i, label in enumerate(sorted(unique_labels)):
         mask = full_labels == i
         pts = coords[mask]
-        center = (centres[i][0], centres[i][1])
+        count = int(mask.sum())
+        center = (float(centres[i][0]), float(centres[i][1]))
         lat_min, lon_min = pts.min(axis=0)
         lat_max, lon_max = pts.max(axis=0)
+
+        # Estimate runs and distance proportionally
+        fraction = count / total_points if total_points > 0 else 0
+        est_runs = max(1, round(total_activities * fraction))
+        est_km = total_distance_km * fraction
+
+        # Reverse geocode cluster centre
+        location = _reverse_geocode(center[0], center[1])
+        logger.info(f"Cluster {i+1}: {location} ({count:,} pts, ~{est_runs} runs, ~{est_km:.0f} km)")
+
         clusters.append({
             'center': center,
-            'bbox': (lat_min, lat_max, lon_min, lon_max),
-            'count': int(mask.sum()),
+            'bbox': (float(lat_min), float(lat_max), float(lon_min), float(lon_max)),
+            'count': count,
+            'location': location,
+            'est_runs': est_runs,
+            'est_km': est_km,
         })
 
-    # Sort by point count descending, take top N
     clusters.sort(key=lambda c: c['count'], reverse=True)
     clusters = clusters[:n_hotspots]
 
     # Fallback: if fewer clusters than panels, fill with wider zoom views
-    # of the largest cluster
     while len(clusters) < n_hotspots and clusters:
         base = clusters[0]
         lat_min, lat_max, lon_min, lon_max = base['bbox']
         lat_range = lat_max - lat_min
         lon_range = lon_max - lon_min
-        padding = 0.3 * len(clusters)  # progressively wider
+        padding = 0.3 * len(clusters)
         wider_bbox = (
             lat_min - lat_range * padding,
             lat_max + lat_range * padding,
@@ -147,6 +210,9 @@ def detect_hotspots(
             'center': base['center'],
             'bbox': wider_bbox,
             'count': base['count'],
+            'location': base['location'] + ' (wide)',
+            'est_runs': base['est_runs'],
+            'est_km': base['est_km'],
         })
 
     return clusters
@@ -157,9 +223,9 @@ def render_hotspot_panel(
     points_mercator: Tuple[np.ndarray, np.ndarray],
     bbox_mercator: Tuple[float, float, float, float],
     title: str,
-    cmap: str = 'hot',
-    grid_size: int = 200,
-    sigma: float = 3.0,
+    subtitle: str = '',
+    grid_size: int = 350,
+    sigma: float = 4.0,
 ) -> None:
     """Render a single heatmap panel onto the given axes."""
     x, y = points_mercator
@@ -173,28 +239,33 @@ def render_hotspot_panel(
     # Smooth
     hist = gaussian_filter(hist.T, sigma=sigma)
 
-    # Mask zeros for transparency
-    hist_masked = np.ma.masked_where(hist == 0, hist)
+    # Normalize to 0-1 for the custom colormap, apply log scaling for
+    # better contrast between low and high density areas
+    max_val = hist.max()
+    if max_val > 0:
+        hist_norm = np.log1p(hist) / np.log1p(max_val)
+    else:
+        hist_norm = hist
 
-    ax.imshow(
-        hist_masked,
-        extent=[x_min, x_max, y_min, y_max],
-        origin='lower',
-        cmap=cmap,
-        alpha=0.7,
-        aspect='auto',
-        zorder=2,
-    )
+    # Build RGBA image with per-pixel alpha from our alpha curve
+    cmap = HEATMAP_CMAP
+    rgba = cmap(hist_norm)
+    # Interpolate alpha from our defined values
+    alpha_positions = [pos for pos, _ in _HEATMAP_COLORS]
+    for i_row in range(rgba.shape[0]):
+        for i_col in range(rgba.shape[1]):
+            v = hist_norm[i_row, i_col]
+            rgba[i_row, i_col, 3] = np.interp(v, alpha_positions, HEATMAP_ALPHA_VALUES)
 
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
 
-    # Add basemap tiles
+    # Add basemap tiles FIRST so heatmap renders on top
     try:
         cx.add_basemap(
             ax,
             crs='EPSG:3857',
-            source=cx.providers.CartoDB.DarkMatter,
+            source=cx.providers.CartoDB.DarkMatterNoLabels,
             zoom='auto',
             zorder=1,
         )
@@ -202,11 +273,33 @@ def render_hotspot_panel(
         logger.warning(f"Could not fetch basemap tiles: {e}")
         ax.set_facecolor('#1a1a2e')
 
-    ax.set_title(title, color='white', fontsize=12, fontweight='bold', pad=8)
+    ax.imshow(
+        rgba,
+        extent=[x_min, x_max, y_min, y_max],
+        origin='lower',
+        aspect='auto',
+        zorder=2,
+        interpolation='bilinear',
+    )
+
+    # Panel title and subtitle
+    ax.set_title(
+        title, color='white', fontsize=13, fontweight='bold', pad=10,
+        fontfamily='sans-serif',
+    )
+    if subtitle:
+        ax.text(
+            0.5, 1.0, subtitle,
+            transform=ax.transAxes, ha='center', va='top',
+            fontsize=9.5, color='#b0b0b0', fontstyle='italic',
+            fontfamily='sans-serif',
+        )
+
     ax.set_xticks([])
     ax.set_yticks([])
     for spine in ax.spines.values():
-        spine.set_visible(False)
+        spine.set_edgecolor('#333355')
+        spine.set_linewidth(1.5)
 
 
 def create_static_heatmap(
@@ -215,13 +308,14 @@ def create_static_heatmap(
     n_panels: int = 4,
     layout: Optional[Tuple[int, int]] = None,
     figsize: Tuple[int, int] = (16, 16),
-    dpi: int = 200,
+    dpi: int = 250,
     fmt: str = 'png',
-    title: str = 'Running Hotspots',
+    title: str = '\U0001f525\U0001f3c3 Running Hotspots \U0001f3c3\U0001f525',
     eps_km: float = 2.0,
     min_samples: int = 50,
-    cmap: str = 'hot',
-    sigma: float = 3.0,
+    sigma: float = 4.0,
+    total_activities: int = 0,
+    total_distance_km: float = 0.0,
 ) -> str:
     """Generate a multi-panel static heatmap image.
 
@@ -234,16 +328,18 @@ def create_static_heatmap(
 
     logger.info(f"Detecting hotspots (eps_km={eps_km}, min_samples={min_samples})...")
     hotspots = detect_hotspots(
-        coordinates, n_hotspots=n_panels, eps_km=eps_km, min_samples=min_samples
+        coordinates, n_hotspots=n_panels, eps_km=eps_km, min_samples=min_samples,
+        total_activities=total_activities, total_distance_km=total_distance_km,
     )
 
     # Convert all points to Mercator once
     all_coords = np.array(coordinates)
     all_x, all_y = latlon_array_to_mercator(all_coords[:, 0], all_coords[:, 1])
 
+    bg_color = '#0d1117'
     fig, axes = plt.subplots(
         layout[0], layout[1], figsize=figsize,
-        facecolor='#1a1a2e',
+        facecolor=bg_color,
     )
     if n_panels == 1:
         axes = np.array([axes])
@@ -251,13 +347,13 @@ def create_static_heatmap(
 
     for i, hotspot in enumerate(hotspots):
         ax = axes[i]
-        ax.set_facecolor('#1a1a2e')
+        ax.set_facecolor(bg_color)
 
         lat_min, lat_max, lon_min, lon_max = hotspot['bbox']
 
-        # Add 10% padding
-        lat_pad = (lat_max - lat_min) * 0.1
-        lon_pad = (lon_max - lon_min) * 0.1
+        # Add 15% padding
+        lat_pad = (lat_max - lat_min) * 0.15
+        lon_pad = (lon_max - lon_min) * 0.15
         lat_min -= lat_pad
         lat_max += lat_pad
         lon_min -= lon_pad
@@ -277,19 +373,39 @@ def create_static_heatmap(
         )
         panel_x, panel_y = all_x[mask], all_y[mask]
 
-        panel_title = f"Hotspot {i + 1} ({hotspot['count']:,} points)"
+        panel_title = f"\U0001f4cd {hotspot['location']}"
+        subtitle = f"{hotspot['est_runs']} runs \u00b7 {hotspot['est_km']:.0f} km"
 
         render_hotspot_panel(
             ax, (panel_x, panel_y), bbox_mercator,
-            title=panel_title, cmap=cmap, sigma=sigma,
+            title=panel_title, subtitle=subtitle, sigma=sigma,
         )
 
     # Hide extra axes
     for j in range(len(hotspots), len(axes)):
         axes[j].set_visible(False)
 
-    fig.suptitle(title, color='white', fontsize=20, fontweight='bold', y=0.98)
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.suptitle(
+        title, color='white', fontsize=24, fontweight='bold', y=0.97,
+        fontfamily='sans-serif',
+    )
+
+    # Summary line under title
+    total_km_all = total_distance_km
+    summary_parts = []
+    if total_activities:
+        summary_parts.append(f'{total_activities} activities')
+    if total_km_all > 0:
+        summary_parts.append(f'{total_km_all:,.0f} km total')
+    summary_parts.append(f'{len(coordinates):,} GPS points')
+    summary = ' \u00b7 '.join(summary_parts)
+    fig.text(
+        0.5, 0.935, summary,
+        ha='center', va='top', fontsize=12, color='#888899',
+        fontfamily='sans-serif',
+    )
+
+    fig.tight_layout(rect=[0.01, 0.01, 0.99, 0.92], h_pad=3.0, w_pad=2.0)
 
     fig.savefig(output_path, dpi=dpi, format=fmt, facecolor=fig.get_facecolor())
     plt.close(fig)
@@ -303,10 +419,9 @@ if __name__ == '__main__':
     ap.add_argument('--output', '-o', default='heatmap_export.png', help='Output file path')
     ap.add_argument('--panels', type=int, default=4, help='Number of hotspot panels')
     ap.add_argument('--format', choices=['png', 'jpeg'], default='png', help='Image format')
-    ap.add_argument('--dpi', type=int, default=200, help='Image DPI')
+    ap.add_argument('--dpi', type=int, default=250, help='Image DPI')
     ap.add_argument('--eps-km', type=float, default=2.0, help='DBSCAN eps in km')
     ap.add_argument('--min-samples', type=int, default=50, help='DBSCAN min_samples')
-    ap.add_argument('--cmap', default='hot', help='Matplotlib colormap name')
     args = ap.parse_args()
 
     cache = CoordinateCache()
@@ -315,16 +430,21 @@ if __name__ == '__main__':
     if cache_data is not None:
         logger.info(f"Using cached data with {len(cache_data['coordinates']):,} coordinates")
         coordinates = cache_data['coordinates']
+        activities = cache_data.get('activities', [])
     else:
         logger.info("Parsing activity files...")
         parser = StravaDataParser(args.data_dir)
         coordinates = parser.parse_all_activities()
+        activities = parser.activities
         if coordinates:
             cache.set(args.data_dir, coordinates, parser.activities, parser._file_counts)
 
     if not coordinates:
         logger.error("No coordinates found. Check your --data-dir path.")
         raise SystemExit(1)
+
+    total_activities = len(activities)
+    total_distance_km = sum(a.get('distance_m', 0) for a in activities) / 1000.0
 
     create_static_heatmap(
         coordinates,
@@ -334,5 +454,6 @@ if __name__ == '__main__':
         fmt=args.format,
         eps_km=args.eps_km,
         min_samples=args.min_samples,
-        cmap=args.cmap,
+        total_activities=total_activities,
+        total_distance_km=total_distance_km,
     )

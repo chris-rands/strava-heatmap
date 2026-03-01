@@ -138,11 +138,14 @@ def export():
         tmp = tempfile.NamedTemporaryFile(suffix=f'.{ext}', delete=False)
         tmp.close()
 
+        stats = parser.get_activity_stats()
         create_static_heatmap(
             coordinates,
             output_path=tmp.name,
             n_panels=n_panels,
             fmt=fmt,
+            total_activities=stats.get('total_activities', 0),
+            total_distance_km=stats.get('total_distance_km', 0),
         )
 
         mimetype = 'image/png' if fmt == 'png' else 'image/jpeg'

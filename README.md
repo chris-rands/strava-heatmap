@@ -4,10 +4,12 @@ An interactive web application that visualizes your Strava running activities as
 
 ## Features
 
-- Parse Strava export data (GPX, FIT, and TCX formats)
+- Parse Strava export data (GPX, FIT, FIT.gz, and TCX formats)
 - Interactive heatmap visualization using Leaflet
-- Activity statistics dashboard
+- Static heatmap export (PNG/JPEG) with auto-detected running hotspots
+- Activity statistics dashboard (distance, pace, duration)
 - Multiple map tile layers
+- Coordinate caching for fast repeat loads
 - Web-based interface with Flask
 
 ## Prerequisites
@@ -47,6 +49,8 @@ pip install -r requirements.txt
 
 ## Usage
 
+### Web Interface
+
 1. Make sure your virtual environment is activated:
 ```bash
 source venv/bin/activate
@@ -63,6 +67,24 @@ http://localhost:5000
 ```
 
 4. Enter the path to your Strava `activities` folder and click "Generate Heatmap"
+5. Use the nav links to switch between the interactive heatmap, statistics, and static image export
+
+### Static Image Export (CLI)
+
+Generate a multi-panel PNG/JPEG showing your top running hotspots, suitable for social media:
+
+```bash
+python static_export.py --data-dir ./data/activities --output heatmap.png
+```
+
+Options:
+- `--panels N` — number of hotspot panels (default: 4)
+- `--format png|jpeg` — image format (default: png)
+- `--dpi N` — image resolution (default: 250)
+- `--eps-km N` — DBSCAN clustering radius in km (default: 2.0)
+- `--min-samples N` — minimum points for a cluster (default: 50)
+
+The export auto-detects geographic clusters, reverse-geocodes each to a place name, and renders a dark-themed heatmap with per-panel run/distance stats.
 
 ## Project Structure
 
@@ -70,22 +92,25 @@ http://localhost:5000
 strava-heatmap/
 ├── app.py              # Flask web application
 ├── parser.py           # Data parsing module (GPX, FIT, TCX)
-├── heatmap.py          # Heatmap visualization module
+├── heatmap.py          # Interactive heatmap visualization (Folium)
+├── static_export.py    # Static heatmap image export (matplotlib)
+├── cache.py            # Disk-based coordinate cache
 ├── requirements.txt    # Python dependencies
 ├── templates/          # HTML templates
 │   ├── base.html
 │   ├── index.html
 │   ├── heatmap.html
 │   └── stats.html
-└── README.md          # This file
+└── README.md           # This file
 ```
 
 ## How It Works
 
-1. **Data Parsing**: The app reads your activity files (GPX, FIT, or TCX format) from the Strava export
-2. **Coordinate Extraction**: GPS coordinates are extracted from each activity
-3. **Visualization**: All coordinates are combined and rendered as an interactive heatmap using Folium
-4. **Web Interface**: Flask serves the visualization through a user-friendly web interface
+1. **Data Parsing**: The app reads your activity files (GPX, FIT, FIT.gz, or TCX format) from the Strava export, with GPS point downsampling to reduce data size
+2. **Caching**: Parsed coordinates are cached to disk (`.cache/`) so subsequent loads are instant
+3. **Interactive Heatmap**: All coordinates are rendered as an interactive heatmap using Folium/Leaflet
+4. **Static Export**: DBSCAN clustering identifies geographic hotspots, each rendered as a panel with dark basemap tiles, a smoothed heatmap overlay, and reverse-geocoded location names
+5. **Web Interface**: Flask serves the visualizations through a user-friendly web interface
 
 ## Features Explained
 
@@ -95,14 +120,21 @@ strava-heatmap/
 - Blue areas show less frequent routes
 - Multiple map layers available (OpenStreetMap, CartoDB Positron, CartoDB Dark Matter)
 
+### Static Export
+- Multi-panel image with your top running hotspots
+- Each panel shows a place name, estimated run count, and distance
+- Dark themed with custom heatmap colormap
+- Suitable for sharing on social media
+
 ### Statistics View
-- Total number of activities
-- Total GPS data points
+- Total number of activities and GPS data points
+- Total and average distance (km and miles)
+- Average pace and duration
 - Breakdown by file type (GPX, FIT, TCX)
 
 ## Customization
 
-You can customize the heatmap appearance by modifying parameters in `heatmap.py`:
+You can customize the interactive heatmap appearance by modifying parameters in `heatmap.py`:
 
 - `radius`: Size of the heatmap points (default: 10)
 - `blur`: Blur radius (default: 15)
@@ -123,6 +155,10 @@ You can customize the heatmap appearance by modifying parameters in `heatmap.py`
 - Make sure you've activated the virtual environment
 - Try reinstalling dependencies: `pip install -r requirements.txt`
 
+### Static export runs out of memory
+- The DBSCAN clustering subsamples to 20K points by default, so this should not happen
+- If it does, try reducing `--panels` to 2
+
 ## Dependencies
 
 - **Flask**: Web framework
@@ -130,29 +166,18 @@ You can customize the heatmap appearance by modifying parameters in `heatmap.py`
 - **gpxpy**: GPX file parsing
 - **fitparse**: FIT file parsing
 - **python-dateutil**: Date/time utilities
+- **matplotlib**: Static image rendering
+- **contextily**: Basemap tiles for static export
+- **scikit-learn**: DBSCAN clustering for hotspot detection
+- **scipy**: Gaussian smoothing for heatmap overlay
+- **numpy**: Numerical operations
 
 ## Privacy Note
 
-All data processing happens locally on your computer. Your Strava data is never uploaded to any external server (except for the map tiles from OpenStreetMap/CartoDB, which only receive the geographic coordinates being displayed).
+All data processing happens locally on your computer. Your Strava data is never uploaded to any external server. The only external network requests are:
+- Map tile fetches from OpenStreetMap/CartoDB (receive geographic bounding boxes only)
+- Reverse geocoding via Nominatim (receives cluster centre coordinates for place name lookup)
 
 ## License
 
 This project is provided as-is for personal use.
-
-## Future Enhancements
-
-Potential features to add:
-- Filter activities by date range
-- Activity type filtering (run, bike, etc.)
-- Distance and elevation statistics
-- Export heatmap as image
-- Individual route viewing
-- Year-over-year comparisons
-
-## Support
-
-For issues or questions, please check:
-1. Ensure your virtual environment is activated
-2. Verify the path to your Strava data is correct
-3. Check that activity files are present in the directory
-4. Review console output for error messages

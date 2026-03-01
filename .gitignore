@@ -6,3 +6,6 @@ __pycache__/
 .env
 data/
 venv/
+*.png
+*.jpg
+*.jpeg
