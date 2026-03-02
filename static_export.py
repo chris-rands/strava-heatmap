@@ -7,8 +7,10 @@ import argparse
 import json
 import logging
 import math
+import time
 import urllib.request
 import urllib.parse
+from pathlib import Path
 from typing import List, Tuple, Optional
 
 import numpy as np
@@ -26,18 +28,18 @@ from cache import CoordinateCache
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Custom colormap: transparent → orange → yellow → white-hot
-# Alpha is baked in via a separate array and applied vectorised
-_CMAP_POSITIONS = [0.0, 0.1, 0.35, 0.6, 0.85, 1.0]
+# Custom colormap: transparent → deep red → orange → yellow → white
+# High alpha so routes are vivid over the dimmed basemap
+_CMAP_POSITIONS = [0.0, 0.05, 0.25, 0.5, 0.8, 1.0]
 _CMAP_RGBS = [
     (0.0, 0.0, 0.0),
-    (0.5, 0.0, 0.0),
-    (0.9, 0.15, 0.0),
-    (1.0, 0.55, 0.0),
-    (1.0, 0.9, 0.2),
-    (1.0, 1.0, 0.85),
+    (0.7, 0.0, 0.05),
+    (1.0, 0.2, 0.0),
+    (1.0, 0.6, 0.0),
+    (1.0, 0.95, 0.2),
+    (1.0, 1.0, 0.9),
 ]
-_CMAP_ALPHAS = [0.0, 0.25, 0.55, 0.7, 0.8, 0.9]
+_CMAP_ALPHAS = [0.0, 0.7, 0.85, 0.9, 0.95, 1.0]
 
 HEATMAP_CMAP = LinearSegmentedColormap.from_list(
     'strava_heat',
@@ -45,8 +47,33 @@ HEATMAP_CMAP = LinearSegmentedColormap.from_list(
 )
 
 
+# On-disk cache for geocoding results so we only hit Nominatim once per location
+_GEOCODE_CACHE_PATH = Path('.cache/geocode.json')
+
+
+def _load_geocode_cache() -> dict:
+    try:
+        return json.loads(_GEOCODE_CACHE_PATH.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_geocode_cache(cache: dict) -> None:
+    _GEOCODE_CACHE_PATH.parent.mkdir(exist_ok=True)
+    _GEOCODE_CACHE_PATH.write_text(json.dumps(cache))
+
+
 def _reverse_geocode(lat: float, lon: float) -> str:
-    """Get a human-readable place name via Nominatim reverse geocoding."""
+    """Get a human-readable place name via Nominatim reverse geocoding.
+
+    Results are cached to disk so repeated runs don't re-request.
+    """
+    # Round to 2 decimal places (~1km) for cache key stability
+    cache_key = f'{lat:.2f},{lon:.2f}'
+    cache = _load_geocode_cache()
+    if cache_key in cache:
+        return cache[cache_key]
+
     params = urllib.parse.urlencode({
         'lat': f'{lat:.5f}',
         'lon': f'{lon:.5f}',
@@ -69,10 +96,15 @@ def _reverse_geocode(lat: float, lon: float) -> str:
         )
         country = addr.get('country_code', '').upper()
         if name and country:
-            return f'{name}, {country}'
-        if name:
-            return name
-        return data.get('display_name', '').split(',')[0]
+            result = f'{name}, {country}'
+        elif name:
+            result = name
+        else:
+            result = data.get('display_name', '').split(',')[0]
+
+        cache[cache_key] = result
+        _save_geocode_cache(cache)
+        return result
     except Exception as e:
         logger.warning(f'Reverse geocoding failed for ({lat:.3f}, {lon:.3f}): {e}')
         return f'{lat:.2f}\u00b0N, {lon:.2f}\u00b0E'
@@ -174,26 +206,32 @@ def detect_hotspots(
         lat_min, lon_min = pts.min(axis=0)
         lat_max, lon_max = pts.max(axis=0)
 
-        # Estimate runs and distance proportionally
         fraction = count / total_points if total_points > 0 else 0
         est_runs = max(1, round(total_activities * fraction))
         est_km = total_distance_km * fraction
-
-        # Reverse geocode cluster centre
-        location = _reverse_geocode(center[0], center[1])
-        logger.info(f"Cluster {i+1}: {location} ({count:,} pts, ~{est_runs} runs, ~{est_km:.0f} km)")
 
         clusters.append({
             'center': center,
             'bbox': (float(lat_min), float(lat_max), float(lon_min), float(lon_max)),
             'count': count,
-            'location': location,
             'est_runs': est_runs,
             'est_km': est_km,
         })
 
+    # Select top N BEFORE geocoding to avoid rate limits
     clusters.sort(key=lambda c: c['count'], reverse=True)
     clusters = clusters[:n_hotspots]
+
+    # Reverse geocode only the selected clusters (with 1s delay for Nominatim)
+    for i, cluster in enumerate(clusters):
+        if i > 0:
+            time.sleep(1.1)
+        location = _reverse_geocode(cluster['center'][0], cluster['center'][1])
+        cluster['location'] = location
+        logger.info(
+            f"Hotspot {i+1}: {location} "
+            f"({cluster['count']:,} pts, ~{cluster['est_runs']} runs, ~{cluster['est_km']:.0f} km)"
+        )
 
     # Fallback: if fewer clusters than panels, fill with wider zoom views
     while len(clusters) < n_hotspots and clusters:
@@ -255,30 +293,44 @@ def render_hotspot_panel(
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
 
-    # Basemap tiles first (behind the heatmap)
+    # Layer 1: Colorful basemap (Voyager — streets, water, parks in colour)
     try:
+        lon_w = x_min * 180.0 / 20037508.34
+        lon_e = x_max * 180.0 / 20037508.34
+        lat_s = math.degrees(2 * math.atan(math.exp(y_min * math.pi / 20037508.34)) - math.pi / 2)
+        lat_n = math.degrees(2 * math.atan(math.exp(y_max * math.pi / 20037508.34)) - math.pi / 2)
+        auto_zoom = cx.tile._calculate_zoom(lon_w, lat_s, lon_e, lat_n)
+        tile_zoom = min(auto_zoom + 1, 16)
         cx.add_basemap(
             ax,
             crs='EPSG:3857',
-            source=cx.providers.CartoDB.DarkMatter,
-            zoom='auto',
+            source=cx.providers.CartoDB.Voyager,
+            zoom=tile_zoom,
             zorder=1,
         )
     except Exception as e:
         logger.warning(f"Could not fetch basemap tiles: {e}")
-        ax.set_facecolor('#0d1117')
 
-    # Heatmap overlay
+    # Layer 2: Semi-transparent dark veil — dims the basemap so the
+    # heatmap pops, while keeping geography (water, parks, labels) visible
+    from matplotlib.patches import Rectangle
+    veil = Rectangle(
+        (x_min, y_min), x_max - x_min, y_max - y_min,
+        facecolor='black', alpha=0.45, zorder=2,
+    )
+    ax.add_patch(veil)
+
+    # Layer 3: Heatmap overlay
     ax.imshow(
         rgba,
         extent=[x_min, x_max, y_min, y_max],
         origin='lower',
         aspect='auto',
-        zorder=2,
+        zorder=3,
         interpolation='bilinear',
     )
 
-    # Title and subtitle
+    # Title and subtitle (white text on dark background)
     ax.set_title(
         title, color='white', fontsize=14, fontweight='bold', pad=12,
         fontfamily='sans-serif',
@@ -287,14 +339,14 @@ def render_hotspot_panel(
         ax.text(
             0.5, 1.0, subtitle,
             transform=ax.transAxes, ha='center', va='top',
-            fontsize=10, color='#aaaaaa', fontstyle='italic',
+            fontsize=10, color='#bbbbbb', fontstyle='italic',
             fontfamily='sans-serif',
         )
 
     ax.set_xticks([])
     ax.set_yticks([])
     for spine in ax.spines.values():
-        spine.set_edgecolor('#333355')
+        spine.set_edgecolor('#444444')
         spine.set_linewidth(1.5)
 
 
@@ -351,7 +403,7 @@ def create_static_heatmap(
     all_coords = np.array(coordinates)
     all_x, all_y = latlon_array_to_mercator(all_coords[:, 0], all_coords[:, 1])
 
-    bg_color = '#0d1117'
+    bg_color = '#1a1a2e'
     fig, axes = plt.subplots(
         layout[0], layout[1], figsize=figsize,
         facecolor=bg_color,
