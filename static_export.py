@@ -316,7 +316,7 @@ def render_hotspot_panel(
     from matplotlib.patches import Rectangle
     veil = Rectangle(
         (x_min, y_min), x_max - x_min, y_max - y_min,
-        facecolor='black', alpha=0.45, zorder=2,
+        facecolor='#0a0a2e', alpha=0.45, zorder=2,
     )
     ax.add_patch(veil)
 
@@ -331,14 +331,15 @@ def render_hotspot_panel(
     )
 
     # Title and subtitle (white text on dark background)
+    # Increase pad to make room for subtitle between title and map
     ax.set_title(
-        title, color='white', fontsize=16, fontweight='bold', pad=6,
+        title, color='white', fontsize=16, fontweight='bold', pad=30,
         fontfamily='sans-serif',
     )
     if subtitle:
         ax.text(
-            0.5, 1.0, subtitle,
-            transform=ax.transAxes, ha='center', va='top',
+            0.5, 1.01, subtitle,
+            transform=ax.transAxes, ha='center', va='bottom',
             fontsize=13, color='white', fontweight='bold',
             fontfamily='sans-serif',
         )
@@ -353,7 +354,7 @@ def render_hotspot_panel(
 # Layout presets: (rows, cols, figsize)
 _LAYOUT_PRESETS = {
     1: (1, 1, (12, 12)),
-    2: (1, 2, (20, 10)),
+    2: (1, 2, (20, 12)),
     4: (2, 2, (16, 16)),
 }
 
