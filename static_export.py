@@ -340,7 +340,7 @@ def render_hotspot_panel(
         ax.text(
             0.5, 1.01, subtitle,
             transform=ax.transAxes, ha='center', va='bottom',
-            fontsize=13, color='white', fontweight='bold',
+            fontsize=13, color='#ffb347', fontweight='bold',
             fontfamily='sans-serif',
         )
 
@@ -468,7 +468,7 @@ def create_static_heatmap(
     summary = '  |  '.join(summary_parts)
     fig.text(
         0.5, 0.928, summary,
-        ha='center', va='top', fontsize=14, color='white',
+        ha='center', va='top', fontsize=14, color='#ffb347',
         fontweight='bold', fontfamily='sans-serif',
     )
 
