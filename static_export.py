@@ -332,14 +332,14 @@ def render_hotspot_panel(
 
     # Title and subtitle (white text on dark background)
     ax.set_title(
-        title, color='white', fontsize=14, fontweight='bold', pad=12,
+        title, color='white', fontsize=16, fontweight='bold', pad=6,
         fontfamily='sans-serif',
     )
     if subtitle:
         ax.text(
             0.5, 1.0, subtitle,
             transform=ax.transAxes, ha='center', va='top',
-            fontsize=10, color='#bbbbbb', fontstyle='italic',
+            fontsize=13, color='white', fontweight='bold',
             fontfamily='sans-serif',
         )
 
@@ -366,7 +366,7 @@ def create_static_heatmap(
     figsize: Optional[Tuple[int, int]] = None,
     dpi: int = 250,
     fmt: str = 'png',
-    title: str = '* Running Hotspots *',
+    title: str = 'Where I Run',
     eps_km: float = 2.0,
     min_samples: int = 50,
     sigma: float = 1.2,
@@ -453,25 +453,25 @@ def create_static_heatmap(
         axes[j].set_visible(False)
 
     fig.suptitle(
-        title, color='white', fontsize=22, fontweight='bold', y=0.97,
+        title, color='white', fontsize=26, fontweight='bold', y=0.96,
         fontfamily='sans-serif',
     )
 
-    # Summary line under title
+    # Summary line — all activities, not just displayed clusters
     summary_parts = []
     if total_activities:
-        summary_parts.append(f'{total_activities} activities')
+        summary_parts.append(f'{total_activities} runs')
     if total_distance_km > 0:
-        summary_parts.append(f'{total_distance_km:,.0f} km total')
+        summary_parts.append(f'{total_distance_km:,.0f} km')
     summary_parts.append(f'{len(coordinates):,} GPS points')
     summary = '  |  '.join(summary_parts)
     fig.text(
-        0.5, 0.935, summary,
-        ha='center', va='top', fontsize=11, color='#888899',
-        fontfamily='sans-serif',
+        0.5, 0.928, summary,
+        ha='center', va='top', fontsize=14, color='white',
+        fontweight='bold', fontfamily='sans-serif',
     )
 
-    fig.tight_layout(rect=[0.01, 0.01, 0.99, 0.92], h_pad=3.0, w_pad=2.0)
+    fig.tight_layout(rect=[0.01, 0.01, 0.99, 0.93], h_pad=0.5, w_pad=2.0)
 
     fig.savefig(output_path, dpi=dpi, format=fmt, facecolor=fig.get_facecolor())
     plt.close(fig)
