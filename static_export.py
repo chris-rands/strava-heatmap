@@ -5,6 +5,7 @@ running hotspots with dark basemap and heatmap overlay.
 
 import argparse
 import json
+import os
 import logging
 import math
 import time
@@ -20,6 +21,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
+import matplotlib.font_manager as fm
+from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
 import contextily as cx
 
 from parser import StravaDataParser
@@ -108,6 +111,48 @@ def _reverse_geocode(lat: float, lon: float) -> str:
     except Exception as e:
         logger.warning(f'Reverse geocoding failed for ({lat:.3f}, {lon:.3f}): {e}')
         return f'{lat:.2f}\u00b0N, {lon:.2f}\u00b0E'
+
+
+def _add_scale_bar(
+    ax: plt.Axes,
+    bbox_mercator: Tuple[float, float, float, float],
+    center_lat: float,
+) -> None:
+    """Add an accurate scale bar to a map panel.
+
+    Computes the real-world distance at the panel's centre latitude
+    and picks a clean round number for the bar length.
+    """
+    x_min, x_max, y_min, y_max = bbox_mercator
+    cos_lat = math.cos(math.radians(center_lat))
+
+    # Panel width in real-world km
+    panel_width_km = (x_max - x_min) * cos_lat / 1000
+
+    # Target ~20% of panel width, pick nearest nice number
+    target_km = panel_width_km * 0.2
+    nice_numbers = [0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500]
+    scale_km = min(nice_numbers, key=lambda n: abs(n - target_km))
+
+    # Convert km back to mercator units at this latitude
+    bar_width = scale_km * 1000 / cos_lat
+
+    if scale_km >= 1:
+        label = f"{int(scale_km)} km"
+    else:
+        label = f"{int(scale_km * 1000)} m"
+
+    bar_height = (y_max - y_min) * 0.005
+    fontprops = fm.FontProperties(size=8, weight='bold')
+    scalebar = AnchoredSizeBar(
+        ax.transData, bar_width, label,
+        'lower right', pad=0.5, color='white',
+        frameon=True, size_vertical=bar_height,
+        fontproperties=fontprops, sep=3,
+    )
+    scalebar.patch.set_facecolor((0, 0, 0, 0.5))
+    scalebar.patch.set_edgecolor('none')
+    ax.add_artist(scalebar)
 
 
 def latlon_array_to_mercator(
@@ -277,23 +322,37 @@ def render_hotspot_panel(
     )
 
     # Light smoothing — just enough to connect adjacent GPS points
-    hist = gaussian_filter(hist.T, sigma=sigma)
+    hist_sharp = gaussian_filter(hist.T, sigma=sigma)
+
+    # Bloom/glow layer — wide blur for a soft halo around routes
+    glow_sigma = sigma * 6
+    hist_glow = gaussian_filter(hist.T, sigma=glow_sigma)
 
     # Log-scale normalisation for good contrast
-    max_val = hist.max()
+    max_val = hist_sharp.max()
     if max_val > 0:
-        hist_norm = np.log1p(hist) / np.log1p(max_val)
+        hist_norm = np.log1p(hist_sharp) / np.log1p(max_val)
     else:
-        hist_norm = hist
+        hist_norm = hist_sharp
+
+    glow_max = hist_glow.max()
+    if glow_max > 0:
+        glow_norm = np.log1p(hist_glow) / np.log1p(glow_max)
+    else:
+        glow_norm = hist_glow
 
     # Build RGBA: apply colormap then vectorised alpha interpolation
     rgba = HEATMAP_CMAP(hist_norm)
     rgba[..., 3] = np.interp(hist_norm, _CMAP_POSITIONS, _CMAP_ALPHAS)
 
+    # Glow RGBA: same colormap but reduced alpha for soft halo
+    rgba_glow = HEATMAP_CMAP(glow_norm)
+    rgba_glow[..., 3] = np.interp(glow_norm, _CMAP_POSITIONS, _CMAP_ALPHAS) * 0.45
+
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
 
-    # Layer 1: Colorful basemap (Voyager — streets, water, parks in colour)
+    # Layer 1: Topographic basemap (OpenTopoMap — OS/hiking style with contours)
     try:
         lon_w = x_min * 180.0 / 20037508.34
         lon_e = x_max * 180.0 / 20037508.34
@@ -304,29 +363,38 @@ def render_hotspot_panel(
         cx.add_basemap(
             ax,
             crs='EPSG:3857',
-            source=cx.providers.CartoDB.Voyager,
+            source=cx.providers.OpenTopoMap,
             zoom=tile_zoom,
             zorder=1,
         )
     except Exception as e:
         logger.warning(f"Could not fetch basemap tiles: {e}")
 
-    # Layer 2: Semi-transparent dark veil — dims the basemap so the
-    # heatmap pops, while keeping geography (water, parks, labels) visible
+    # Layer 2: Light semi-transparent veil to soften basemap under heatmap
     from matplotlib.patches import Rectangle
     veil = Rectangle(
         (x_min, y_min), x_max - x_min, y_max - y_min,
-        facecolor='#0a0a2e', alpha=0.45, zorder=2,
+        facecolor='white', alpha=0.25, zorder=2,
     )
     ax.add_patch(veil)
 
-    # Layer 3: Heatmap overlay
+    # Layer 3: Bloom glow (soft wide halo behind sharp routes)
+    ax.imshow(
+        rgba_glow,
+        extent=[x_min, x_max, y_min, y_max],
+        origin='lower',
+        aspect='auto',
+        zorder=3,
+        interpolation='bilinear',
+    )
+
+    # Layer 4: Sharp heatmap overlay
     ax.imshow(
         rgba,
         extent=[x_min, x_max, y_min, y_max],
         origin='lower',
         aspect='auto',
-        zorder=3,
+        zorder=4,
         interpolation='bilinear',
     )
 
@@ -347,7 +415,7 @@ def render_hotspot_panel(
     ax.set_xticks([])
     ax.set_yticks([])
     for spine in ax.spines.values():
-        spine.set_edgecolor('#444444')
+        spine.set_edgecolor('#999999')
         spine.set_linewidth(1.5)
 
 
@@ -373,6 +441,7 @@ def create_static_heatmap(
     sigma: float = 1.2,
     total_activities: int = 0,
     total_distance_km: float = 0.0,
+    enhance_with_gemini: bool = False,
 ) -> str:
     """Generate a multi-panel static heatmap image.
 
@@ -404,7 +473,7 @@ def create_static_heatmap(
     all_coords = np.array(coordinates)
     all_x, all_y = latlon_array_to_mercator(all_coords[:, 0], all_coords[:, 1])
 
-    bg_color = '#1a1a2e'
+    bg_color = '#f5f0e8'
     fig, axes = plt.subplots(
         layout[0], layout[1], figsize=figsize,
         facecolor=bg_color,
@@ -412,6 +481,15 @@ def create_static_heatmap(
     if n_panels == 1:
         axes = np.array([axes])
     axes = np.atleast_1d(axes).flatten()
+
+    # Build summary string (needed for both paths)
+    summary_parts = []
+    if total_activities:
+        summary_parts.append(f'{total_activities} runs')
+    if total_distance_km > 0:
+        summary_parts.append(f'{total_distance_km:,.0f} km')
+    summary_parts.append(f'{len(coordinates):,} GPS points')
+    summary = '  |  '.join(summary_parts)
 
     for i, hotspot in enumerate(hotspots):
         ax = axes[i]
@@ -449,6 +527,9 @@ def create_static_heatmap(
             title=panel_title, subtitle=subtitle, sigma=sigma,
         )
 
+        center_lat = (lat_min + lat_max) / 2
+        _add_scale_bar(ax, bbox_mercator, center_lat)
+
     # Hide extra axes
     for j in range(len(hotspots), len(axes)):
         axes[j].set_visible(False)
@@ -457,15 +538,6 @@ def create_static_heatmap(
         title, color='white', fontsize=26, fontweight='bold', y=0.96,
         fontfamily='sans-serif',
     )
-
-    # Summary line — all activities, not just displayed clusters
-    summary_parts = []
-    if total_activities:
-        summary_parts.append(f'{total_activities} runs')
-    if total_distance_km > 0:
-        summary_parts.append(f'{total_distance_km:,.0f} km')
-    summary_parts.append(f'{len(coordinates):,} GPS points')
-    summary = '  |  '.join(summary_parts)
     fig.text(
         0.5, 0.928, summary,
         ha='center', va='top', fontsize=14, color='#ffb347',
@@ -477,6 +549,17 @@ def create_static_heatmap(
     fig.savefig(output_path, dpi=dpi, format=fmt, facecolor=fig.get_facecolor())
     plt.close(fig)
     logger.info(f"Saved static heatmap to {output_path}")
+
+    if enhance_with_gemini:
+        try:
+            from gemini_enhance import enhance_image_with_gemini
+            base, ext = os.path.splitext(output_path)
+            enhanced_path = f"{base}_enhanced{ext}"
+            enhance_image_with_gemini(output_path, output_path=enhanced_path)
+            output_path = enhanced_path
+        except Exception as e:
+            logger.warning(f"Gemini enhancement failed, returning original: {e}")
+
     return output_path
 
 
@@ -490,7 +573,15 @@ if __name__ == '__main__':
     ap.add_argument('--dpi', type=int, default=250, help='Image DPI')
     ap.add_argument('--eps-km', type=float, default=2.0, help='DBSCAN eps in km')
     ap.add_argument('--min-samples', type=int, default=50, help='DBSCAN min_samples')
+    ap.add_argument('--enhance', action='store_true',
+                    help='Enhance image with Gemini AI (requires GEMINI_API_KEY)')
     args = ap.parse_args()
+
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
 
     cache = CoordinateCache()
     cache_data = cache.get(args.data_dir)
@@ -524,4 +615,5 @@ if __name__ == '__main__':
         min_samples=args.min_samples,
         total_activities=total_activities,
         total_distance_km=total_distance_km,
+        enhance_with_gemini=args.enhance,
     )

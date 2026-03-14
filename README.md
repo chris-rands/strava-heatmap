@@ -6,7 +6,8 @@ An interactive web application that visualizes your Strava running activities as
 
 - Parse Strava export data (GPX, FIT, FIT.gz, and TCX formats)
 - Interactive heatmap visualization using Leaflet
-- Static heatmap export (PNG/JPEG) with auto-detected running hotspots
+- Static heatmap export (PNG/JPEG) with auto-detected running hotspots and scale bars
+- Optional AI enhancement via Gemini (cartoonifies basemap, adds decorations)
 - Activity statistics dashboard (distance, pace, duration)
 - Multiple map tile layers
 - Coordinate caching for fast repeat loads
@@ -78,13 +79,28 @@ python static_export.py --data-dir ./data/activities --output heatmap.png
 ```
 
 Options:
-- `--panels N` — number of hotspot panels (default: 4)
+- `--panels N` — number of hotspot panels (default: 2)
 - `--format png|jpeg` — image format (default: png)
 - `--dpi N` — image resolution (default: 250)
 - `--eps-km N` — DBSCAN clustering radius in km (default: 2.0)
 - `--min-samples N` — minimum points for a cluster (default: 50)
+- `--enhance` — enhance with Gemini AI (requires `GEMINI_API_KEY`, see below)
 
-The export auto-detects geographic clusters, reverse-geocodes each to a place name, and renders a dark-themed heatmap with per-panel run/distance stats.
+The export auto-detects geographic clusters, reverse-geocodes each to a place name, and renders a heatmap with per-panel run/distance stats and accurate scale bars.
+
+### Gemini AI Enhancement
+
+Optionally pass `--enhance` to send the rendered image to Google's Gemini API for cartoonification. Gemini will cartoonify the basemap, add place name labels, running-themed decorations, and playful text styling while preserving the heatmap route lines exactly.
+
+Requires a [Gemini API key](https://aistudio.google.com/apikey). Set it as an environment variable or in a `.env` file:
+
+```bash
+export GEMINI_API_KEY=your_key_here
+# or
+echo "GEMINI_API_KEY=your_key_here" > .env
+```
+
+This produces two files: `heatmap.png` (original) and `heatmap_enhanced.png` (Gemini-enhanced). The enhancement is also available via the web interface at `/export?enhance=true`.
 
 ## Project Structure
 
@@ -94,6 +110,7 @@ strava-heatmap/
 ├── parser.py           # Data parsing module (GPX, FIT, TCX)
 ├── heatmap.py          # Interactive heatmap visualization (Folium)
 ├── static_export.py    # Static heatmap image export (matplotlib)
+├── gemini_enhance.py   # Optional Gemini AI image enhancement
 ├── cache.py            # Disk-based coordinate cache
 ├── requirements.txt    # Python dependencies
 ├── templates/          # HTML templates
@@ -122,8 +139,9 @@ strava-heatmap/
 
 ### Static Export
 - Multi-panel image with your top running hotspots
-- Each panel shows a place name, estimated run count, and distance
-- Dark themed with custom heatmap colormap
+- Each panel shows a place name, estimated run count, distance, and scale bar
+- Topographic basemap with custom heatmap colormap
+- Optional Gemini AI enhancement for a cartoon-style infographic
 - Suitable for sharing on social media
 
 ### Statistics View
@@ -171,12 +189,16 @@ You can customize the interactive heatmap appearance by modifying parameters in 
 - **scikit-learn**: DBSCAN clustering for hotspot detection
 - **scipy**: Gaussian smoothing for heatmap overlay
 - **numpy**: Numerical operations
+- **google-genai**: Gemini API client (optional, for `--enhance`)
+- **Pillow**: Image handling for Gemini enhancement
+- **python-dotenv**: Load API keys from `.env` files (optional)
 
 ## Privacy Note
 
-All data processing happens locally on your computer. Your Strava data is never uploaded to any external server. The only external network requests are:
-- Map tile fetches from OpenStreetMap/CartoDB (receive geographic bounding boxes only)
+All data processing happens locally on your computer. Your Strava data is never uploaded to any external server unless you use `--enhance`. External network requests:
+- Map tile fetches from OpenStreetMap (receive geographic bounding boxes only)
 - Reverse geocoding via Nominatim (receives cluster centre coordinates for place name lookup)
+- **With `--enhance` only**: The rendered heatmap image is sent to Google's Gemini API for enhancement
 
 ## License
 

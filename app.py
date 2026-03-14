@@ -14,6 +14,12 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Initialize cache
 cache = CoordinateCache()
 
@@ -118,6 +124,7 @@ def export():
     data_dir = request.args.get('data_dir', DATA_DIR)
     n_panels = int(request.args.get('panels', 2))
     fmt = request.args.get('format', 'png')
+    enhance = request.args.get('enhance', '').lower() in ('1', 'true', 'yes')
 
     if fmt not in ('png', 'jpeg'):
         flash('Invalid format. Use png or jpeg.', 'error')
@@ -146,6 +153,7 @@ def export():
             fmt=fmt,
             total_activities=stats.get('total_activities', 0),
             total_distance_km=stats.get('total_distance_km', 0),
+            enhance_with_gemini=enhance,
         )
 
         mimetype = 'image/png' if fmt == 'png' else 'image/jpeg'
